@@ -310,69 +310,555 @@ function hetuGetDoc(url) {
     return hetuBrowserDoc(url, BASE_URL + "/");
 }
 
-function hetuBrowserChapter(pair) {
+function hetuCleanChapterHtml(content) {
+    content = (content || "") + "";
+    content = content.replace(/<a[^>]*>([^<]*)<\/a>/gi, "$1");
+    content = content.replace(/<\/?(?:strike|samp|bdo)[^>]*>/gi, "");
+    content = content.replace(/&nbsp;/g, " ");
+    content = content.replace(/小主，这个章节后面还有哦[\s\S]*?继续阅读[\s\S]*?/g, "");
+    content = content.replace(/和[_*]*图[_*]*书/g, "");
+    content = content.replace(/hetushu\.com/gi, "");
+    content = content.replace(/(?:<(?:p|div)>\s*<\/(?:p|div)>\s*)+/g, "");
+    return content;
+}
+
+function hetuB64Decode(input) {
+    input = (input || "") + "";
+    if (!input) return "";
+    try {
+        if (typeof CryptoJS !== "undefined") {
+            return CryptoJS.enc.Base64.parse(input).toString(CryptoJS.enc.Utf8) + "";
+        }
+    } catch (e) {}
+    try {
+        var bytes = java.util.Base64.getDecoder().decode(input);
+        return new java.lang.String(bytes, "UTF-8") + "";
+    } catch (e2) {}
+    return "";
+}
+
+function hetuElementTag(el) {
+    var raw = (el.toString() || "") + "";
+    var m = raw.match(/<\s*([a-zA-Z0-9]+)/);
+    if (m) return m[1].toLowerCase();
+
+    // VBook Rhino may not expose outer HTML in toString()
+    raw = (el.html() || "") + "";
+    if (raw.indexOf("<") === 0) {
+        m = raw.match(/<\s*([a-zA-Z0-9]+)/);
+        if (m) return m[1].toLowerCase();
+    }
+
+    var cls = (el.attr("class") || "") + "";
+    if (cls) return "div";
+    return "div";
+}
+
+function hetuHasClass(el, className) {
+    var cls = (el.attr("class") || "") + "";
+    var classes = cls.split(/\s+/);
+    for (var i = 0; i < classes.length; i++) {
+        if (classes[i] === className) return true;
+    }
+    return false;
+}
+
+function hetuContentHasChapterH2(root) {
+    var found = false;
+    if (!root) return false;
+    hetuCollectDirectChildren(root).forEach(function (el) {
+        if (hetuElementTag(el) === "h2" && hetuHasClass(el, "h2")) found = true;
+    });
+    return found;
+}
+
+function hetuCollectDirectChildren(root) {
+    var items = [];
+
+    function pushAll(list) {
+        list.forEach(function (el) {
+            if (el) items.push(el);
+        });
+    }
+
+    // Prefer child combinator (matches novel-downloader: //div[@id="content"]/*)
+    pushAll(root.select("> div, > h2"));
+    if (items.length === 0) {
+        pushAll(root.select("> div"));
+        pushAll(root.select("> h2"));
+    }
+
+    // Fallback when ">" is unsupported — skip nested div wrappers only
+    if (items.length === 0) {
+        root.select("div, h2").forEach(function (el) {
+            var tag = hetuElementTag(el);
+            if (tag === "div" && el.select("div").size() > 0) return;
+            items.push(el);
+        });
+        console.log("hetuCollectDirectChildren: fallback nested-skip count=" + items.length);
+    } else {
+        console.log("hetuCollectDirectChildren: direct count=" + items.length);
+    }
+
+    return items;
+}
+
+function hetuBuildHiddenClassSet(doc) {
+    var hidden = {};
+    if (!doc) return hidden;
+
+    var cssText = "";
+    doc.select("style").forEach(function (el) {
+        cssText += (el.html() || el.toString() || "") + "\n";
+    });
+
+    var re = /\.([a-zA-Z_][\w-]*)\s*\{[^}]*display\s*:\s*none[^}]*\}/gi;
+    var m;
+    while ((m = re.exec(cssText)) !== null) {
+        hidden[m[1]] = true;
+    }
+
+    doc.select("script").forEach(function (el) {
+        var js = (el.html() || el.toString() || "") + "";
+        re = /\.([a-z]\d{8,10})\s*\{[^}]*display\s*:\s*none/gi;
+        while ((m = re.exec(js)) !== null) {
+            hidden[m[1]] = true;
+        }
+        re = /(?:display\s*=\s*['"]none['"]|\.style\.display\s*=\s*['"]none['"])/gi;
+        if (re.test(js)) {
+            re = /['"]([a-z]\d{8,10})['"]/g;
+            while ((m = re.exec(js)) !== null) {
+                hidden[m[1]] = true;
+            }
+        }
+    });
+
+    return hidden;
+}
+
+function hetuIsObfuscatedClass(cls) {
+    cls = ((cls || "") + "").trim().split(/\s+/)[0];
+    return /^[a-z]\d{8,10}$/i.test(cls);
+}
+
+function hetuDocUsesObfuscatedLayout(doc) {
+    var root = doc.select("#content").first();
+    if (!root) return false;
+
+    var obf = 0;
+    var total = 0;
+    hetuCollectDirectChildren(root).forEach(function (el) {
+        var cls = (el.attr("class") || "") + "";
+        if (cls.indexOf("cmask") > -1) return;
+        if (cls.indexOf("chapter") > -1) return;
+        total++;
+        if (hetuIsObfuscatedClass(cls)) obf++;
+    });
+    return total >= 3 && obf / total >= 0.6;
+}
+
+function hetuCountHiddenBlocks(doc, hiddenClasses) {
+    var root = doc.select("#content").first();
+    if (!root) return 0;
+    var count = 0;
+    hetuCollectDirectChildren(root).forEach(function (el) {
+        if (hetuIsHiddenBlock(el, hiddenClasses)) count++;
+    });
+    return count;
+}
+
+function hetuBrowserVisibleChapter(pair) {
+    if (!pair) return "";
     var b = Engine.newBrowser();
     try {
         b.setUserAgent(UserAgent.android());
-        console.log("hetuBrowserChapter: warm " + pair.index);
-        b.launch(pair.index, 12000);
-        console.log("hetuBrowserChapter: open " + pair.chapter);
-        b.launchAsync(pair.chapter);
-
-        var tries = 0;
-        while (tries < 20) {
-            var title = (b.callJs("document.title", 2000) || "") + "";
-            if (!hetuIsChallengeTitle(title)) {
-                var html = (b.callJs(
-                    "document.querySelector('#content') ? document.querySelector('#content').innerHTML : ''",
-                    3000
-                ) || "") + "";
-                if (html.length > 100) {
-                    console.log("hetuBrowserChapter: #content via JS");
-                    return Html.parse("<div id='hetu-chap'>" + html + "</div>");
-                }
-            }
-            sleep(1000);
-            tries++;
-        }
-
-        return b.html(8000);
+        b.launch(pair.index, 8000);
+        b.launch(pair.chapter, 30000);
+        var js = "(function(){"
+            + "var r=document.querySelector('#content');"
+            + "if(!r)return '';"
+            + "var h='',nodes=r.children,i,el,st,rect,t,cls;"
+            + "for(i=0;i<nodes.length;i++){"
+            + "el=nodes[i];"
+            + "if(!el||el.tagName!=='DIV')continue;"
+            + "cls=el.className||'';"
+            + "if(cls.indexOf('cmask')>=0)continue;"
+            + "st=window.getComputedStyle(el);"
+            + "if(st.display==='none'||st.visibility==='hidden')continue;"
+            + "if(parseFloat(st.opacity||'1')===0)continue;"
+            + "rect=el.getBoundingClientRect();"
+            + "if(rect.height<1&&rect.width<1)continue;"
+            + "t=(el.innerText||'').trim();"
+            + "if(!t)continue;"
+            + "if(cls.indexOf('chapter')>=0)h+='<div class=\"chapter\">'+t+'</div>';"
+            + "else h+='<div>'+t+'</div>';"
+            + "}"
+            + "return h;"
+            + "})()";
+        var result = b.callJs(js, 20000);
+        var html = hetuCleanChapterHtml((result || "") + "");
+        console.log("hetuBrowserVisibleChapter: out=" + (html ? html.length : 0));
+        return html;
     } finally {
         b.close();
     }
 }
 
+function hetuIsHiddenBlock(el, hiddenClasses) {
+    if (!el) return false;
+
+    var style = ((el.attr("style") || "") + "").replace(/\s/g, "").toLowerCase();
+    if (style.indexOf("display:none") >= 0) return true;
+    if (style.indexOf("visibility:hidden") >= 0) return true;
+    if (style.indexOf("opacity:0") >= 0) return true;
+    if (style.indexOf("left:-9999") >= 0 || style.indexOf("left:-99999") >= 0) return true;
+    if (style.indexOf("font-size:0") >= 0) return true;
+    if (style.indexOf("height:0") >= 0 && style.indexOf("overflow:hidden") >= 0) return true;
+
+    var cls = ((el.attr("class") || "") + "").trim();
+    if (!cls || !hiddenClasses) return false;
+    var parts = cls.split(/\s+/);
+    var i;
+    for (i = 0; i < parts.length; i++) {
+        if (hiddenClasses[parts[i]]) return true;
+    }
+    return false;
+}
+
+function hetuBlockText(el) {
+    var text = (el.text() || "").trim() + "";
+    if (text) return text;
+    var html = hetuCleanChapterHtml((el.html() || "") + "");
+    return html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() + "";
+}
+
+function hetuExtractParagraphs(doc) {
+    var title = "";
+    var intro = [];
+    var paragraphs = [];
+    var blockMeta = [];
+    if (!doc) return { title: title, intro: intro, paragraphs: paragraphs, blockMeta: blockMeta };
+
+    var root = doc.select("#content").first();
+    if (!root) root = doc.select("#hetu-chap").first();
+    if (!root) return { title: title, intro: intro, paragraphs: paragraphs, blockMeta: blockMeta };
+
+    var hiddenClasses = hetuBuildHiddenClassSet(doc);
+    var hiddenMarked = 0;
+
+    hetuCollectDirectChildren(root).forEach(function (el) {
+        var cls = (el.attr("class") || "") + "";
+        if (cls.indexOf("cmask") > -1) return;
+
+        if (hetuHasClass(el, "h2")) {
+            title = hetuBlockText(el) || title;
+            return;
+        }
+
+        var hidden = hetuIsHiddenBlock(el, hiddenClasses);
+        var text = hetuBlockText(el);
+        var isChapter = cls.indexOf("chapter") > -1;
+
+        if (isChapter) {
+            if (text) intro.push(text);
+            return;
+        }
+
+        // Keep hidden decoys in reorder array — token count includes them.
+        paragraphs.push(text);
+        blockMeta.push({ chapter: false, hidden: hidden });
+        if (hidden) hiddenMarked++;
+    });
+
+    console.log(
+        "hetuExtractParagraphs: intro=" + intro.length
+        + " blocks=" + paragraphs.length
+        + " hiddenMarked=" + hiddenMarked
+    );
+    return { title: title, intro: intro, paragraphs: paragraphs, blockMeta: blockMeta };
+}
+
+function hetuFilterVisibleBlocks(intro, paragraphs, blockMeta) {
+    var out = [];
+    var metaOut = [];
+    var dropped = 0;
+    var i;
+
+    for (i = 0; i < paragraphs.length; i++) {
+        var meta = blockMeta && blockMeta[i] ? blockMeta[i] : { hidden: false };
+        if (meta.hidden) {
+            dropped++;
+            continue;
+        }
+        if (!paragraphs[i]) {
+            dropped++;
+            continue;
+        }
+        out.push(paragraphs[i]);
+        metaOut.push(meta);
+    }
+
+    console.log(
+        "hetuFilterVisibleBlocks: kept=" + out.length
+        + " dropped=" + dropped
+        + " intro=" + intro.length
+    );
+    return { intro: intro, paragraphs: out, blockMeta: metaOut };
+}
+
+function hetuFisherYatesOrder(n, seed) {
+    if (n <= 0) return [];
+    var i;
+    if (n <= 20) {
+        var identity = [];
+        for (i = 0; i < n; i++) identity.push(i);
+        return identity;
+    }
+
+    var fixed = [];
+    for (i = 0; i < 20; i++) fixed.push(i);
+    var rest = [];
+    for (i = 20; i < n; i++) rest.push(i);
+
+    var m = 233280, a = 9302, c = 49397;
+    var s = seed;
+    for (i = rest.length - 1; i > 0; i--) {
+        s = (s * a + c) % m;
+        var j = Math.floor((s * (i + 1)) / m);
+        var tmp = rest[i];
+        rest[i] = rest[j];
+        rest[j] = tmp;
+    }
+    return fixed.concat(rest);
+}
+
+function hetuReorderParagraphsSeeded(paragraphs, chapId) {
+    var cidNum = parseInt(chapId, 10);
+    if (isNaN(cidNum)) return paragraphs;
+    var n = paragraphs.length;
+    var order = hetuFisherYatesOrder(n, cidNum * 127 + 235);
+    if (order.length !== n) return paragraphs;
+
+    var reordered = [];
+    var i;
+    for (i = 0; i < n; i++) reordered.push("");
+    for (i = 0; i < n; i++) {
+        reordered[order[i]] = paragraphs[i];
+    }
+    return reordered;
+}
+
+function hetuParseOrderToken(token) {
+    token = (token || "") + "";
+    if (!token) return [];
+    var decoded = hetuB64Decode(token);
+    if (!decoded) return [];
+    var parts = decoded.split(/[A-Z]+%/);
+    var orders = [];
+    for (var i = 0; i < parts.length; i++) {
+        var p = (parts[i] || "").trim();
+        if (!p) continue;
+        var n = parseInt(p, 10);
+        if (!isNaN(n)) orders.push(n);
+    }
+    return orders;
+}
+
+function hetuReorderParagraphs(paragraphs, orders, blockMeta) {
+    if (!paragraphs || paragraphs.length === 0) return [];
+    if (!orders || orders.length === 0) return paragraphs;
+
+    var reordered = [];
+    var metaOut = [];
+    var i;
+    for (i = 0; i < paragraphs.length; i++) {
+        reordered.push("");
+        metaOut.push({ chapter: false });
+    }
+
+    var offset = 0;
+    var count = Math.min(paragraphs.length, orders.length);
+    for (i = 0; i < count; i++) {
+        var order = orders[i];
+        var target = order < 5 ? order : order - offset;
+        if (target >= 0 && target < reordered.length) {
+            reordered[target] = paragraphs[i];
+            if (blockMeta && blockMeta[i]) metaOut[target] = blockMeta[i];
+        }
+        if (order < 5) offset++;
+    }
+
+    if (orders.length === paragraphs.length) {
+        return { paragraphs: reordered, blockMeta: metaOut };
+    }
+    return { paragraphs: paragraphs, blockMeta: blockMeta || [] };
+}
+
+function hetuParagraphsToHtml(intro, blockMeta, paragraphs) {
+    var html = "";
+    var i;
+    for (i = 0; i < intro.length; i++) {
+        if (intro[i]) html += "<div class=\"chapter\">" + intro[i] + "</div>";
+    }
+    for (i = 0; i < paragraphs.length; i++) {
+        if (paragraphs[i]) {
+            html += "<div>" + paragraphs[i] + "</div>";
+        }
+    }
+    return hetuCleanChapterHtml(html);
+}
+
+function hetuHostOf(url) {
+    var m = (url + "").match(/^https?:\/\/[^\/]+/);
+    return m ? m[0] : "";
+}
+
+function hetuFetchOrderToken(bookId, chapId, chapterUrl, cookie) {
+    if (!bookId || !chapId) return [];
+    var host = hetuHostOf(chapterUrl);
+    if (!host) return [];
+
+    // Token must come from the SAME host as the fetched chapter HTML,
+    // otherwise the paragraph order/count it encodes won't match.
+    var tokenUrl = host + "/book/" + bookId + "/r" + chapId + ".json";
+    var headers = hetuBuildHeaders(chapterUrl, cookie);
+    headers["X-Requested-With"] = "XMLHttpRequest";
+    headers["Content-Type"] = "application/x-www-form-urlencoded";
+    headers["Accept"] = "*/*";
+
+    var res = fetch(tokenUrl, {
+        headers: headers,
+        timeout: 12000
+    });
+    if (!res.ok) {
+        console.log("hetuFetchOrderToken status=" + res.status + " url=" + tokenUrl);
+        return [];
+    }
+
+    var token = "";
+    try {
+        token = (res.header("Token") || res.header("token") || "") + "";
+    } catch (e) {}
+    if (!token && res.headers) {
+        try {
+            token = (res.headers["Token"] || res.headers["token"] || res.headers["TOKEN"] || "") + "";
+        } catch (e2) {}
+    }
+    if (!token) {
+        try {
+            token = (res.text() || "") + "";
+        } catch (e3) {}
+    }
+
+    var orders = hetuParseOrderToken(token);
+    console.log("hetuFetchOrderToken: host=" + host + " count=" + orders.length);
+    return orders;
+}
+
+function hetuDecodeChapterDoc(doc, bookId, chapId, chapterUrl, cookie) {
+    if (!doc) return "";
+    var parts = hetuExtractParagraphs(doc);
+    if (parts.paragraphs.length === 0) {
+        console.log("hetuDecodeChapterDoc: no paragraphs, fallback html");
+        return hetuExtractChapterHtml(doc);
+    }
+
+    var orders = hetuFetchOrderToken(bookId, chapId, chapterUrl, cookie);
+    var paragraphs = parts.paragraphs;
+    var blockMeta = parts.blockMeta || [];
+    var intro = parts.intro || [];
+    if (orders.length > 0 && orders.length === parts.paragraphs.length) {
+        var reordered = hetuReorderParagraphs(parts.paragraphs, orders, blockMeta);
+        paragraphs = reordered.paragraphs;
+        blockMeta = reordered.blockMeta;
+        console.log("hetuDecodeChapterDoc: token-reorder paras=" + parts.paragraphs.length);
+    } else {
+        paragraphs = hetuReorderParagraphsSeeded(parts.paragraphs, chapId);
+        console.log(
+            "hetuDecodeChapterDoc: seeded-reorder paras=" + parts.paragraphs.length
+            + " tokenOrders=" + orders.length + " (mismatch, ignored)"
+        );
+    }
+
+    var visible = hetuFilterVisibleBlocks(intro, paragraphs, blockMeta);
+    var html = hetuParagraphsToHtml(visible.intro, visible.blockMeta, visible.paragraphs);
+    console.log("hetuDecodeChapterDoc: out=" + (html ? html.length : 0));
+
+    if (!html || html.length < 50) {
+        return hetuExtractChapterHtml(doc);
+    }
+    return html;
+}
+
+function hetuFetchChapterContent(pair) {
+    if (!pair) return "";
+    var bookId = hetuBookId(pair.chapter);
+    var chapId = hetuChapterId(pair.chapter);
+
+    var warmRes = fetch(pair.index, {
+        headers: hetuBuildHeaders(pair.index, ""),
+        timeout: 12000
+    });
+    var cookie = warmRes.ok ? hetuCollectCookie(warmRes) : "";
+
+    var doc = hetuFetchDoc(pair.chapter, pair.index, cookie);
+    if (!doc || !hetuHasChapterContent(doc)) {
+        console.log("hetuFetchChapterContent: retry pair fetch");
+        doc = hetuFetchChapterPair(pair);
+    }
+    if (!doc || !hetuHasChapterContent(doc)) {
+        console.log("hetuFetchChapterContent: chapter doc fail");
+        return "";
+    }
+
+    var obfuscated = hetuDocUsesObfuscatedLayout(doc);
+    var hiddenClasses = hetuBuildHiddenClassSet(doc);
+    var html = hetuDecodeChapterDoc(doc, bookId, chapId, pair.chapter, cookie);
+
+    // New obfuscated layout: decoy divs stay in HTML but browser hides them via CSS/JS.
+    if (obfuscated && hetuCountHiddenBlocks(doc, hiddenClasses) === 0) {
+        console.log("hetuFetchChapterContent: obfuscated layout, browser visible");
+        var browserHtml = hetuBrowserVisibleChapter(pair);
+        if (browserHtml && browserHtml.length > 50) return browserHtml;
+    }
+
+    return html;
+}
+
+function hetuGetChapterContent(url) {
+    url = hetuNormalizeUrl(url);
+    var bookId = hetuBookId(url);
+    var chapId = hetuChapterId(url);
+    if (!bookId || !chapId) return "";
+
+    var mobile = {
+        index: BASE_URL + "/book/" + bookId + "/index.html",
+        chapter: BASE_URL + "/book/" + bookId + "/" + chapId + ".html"
+    };
+    var desktop = {
+        index: DESKTOP_URL + "/book/" + bookId + "/index.html",
+        chapter: DESKTOP_URL + "/book/" + bookId + "/" + chapId + ".html"
+    };
+    var html = "";
+
+    console.log("hetuGetChapterContent: fetch mobile");
+    html = hetuFetchChapterContent(mobile);
+    if (html && html.length > 50) return html;
+
+    console.log("hetuGetChapterContent: fetch desktop");
+    html = hetuFetchChapterContent(desktop);
+    if (html && html.length > 50) return html;
+
+    return "";
+}
+
 function hetuGetChapterDoc(url) {
     url = hetuNormalizeUrl(url);
-
-    var mobile = hetuMobileChapterPair(url);
-    if (mobile) {
-        console.log("hetuGetChapterDoc: direct " + mobile.chapter);
-        var doc = hetuFetchDoc(mobile.chapter, mobile.index, "");
-        if (doc && hetuHasChapterContent(doc)) {
-            console.log("hetuGetChapterDoc: direct OK");
-            return doc;
-        }
-
-        doc = hetuFetchChapterPair(mobile);
-        if (doc && hetuHasChapterContent(doc)) {
-            console.log("hetuGetChapterDoc: mobile pair OK");
-            return doc;
-        }
+    var content = hetuGetChapterContent(url);
+    if (content && content.length > 50) {
+        return Html.parse("<div id='hetu-chap'>" + content + "</div>");
     }
-
-    var desktop = hetuDesktopChapterPair(url);
-    if (desktop) {
-        doc = hetuFetchChapterPair(desktop);
-        if (doc && hetuHasChapterContent(doc)) {
-            console.log("hetuGetChapterDoc: desktop pair OK");
-            return doc;
-        }
-    }
-
-    console.log("hetuGetChapterDoc: browser mode");
-    if (mobile) return hetuBrowserChapter(mobile);
-    return hetuBrowserChapter(desktop);
+    return null;
 }
 
 function hetuBrowserDoc(url, refererUrl) {
@@ -401,20 +887,10 @@ function hetuExtractChapterHtml(doc) {
     if (!contentEl) contentEl = doc.select("#nr, .nr, .nr_content, #chapter-content, .chapter-content").first();
     if (!contentEl) contentEl = doc.select("article, .article, .readcontent, #BookText").first();
 
-    if (!contentEl) {
-        var lastH2 = null;
-        doc.select("h2").forEach(function (el) {
-            lastH2 = el;
-        });
-        if (lastH2 && lastH2.parent()) contentEl = lastH2.parent();
-    }
-
     if (!contentEl) return "";
 
-    contentEl.select("h2, .pagelink, a, script, style, .read-setting").remove();
-    var content = (contentEl.html() || "") + "";
-    content = content.replace(/&nbsp;/g, " ");
-    return content;
+    contentEl.select("h2, .pagelink, script, style, .read-setting").remove();
+    return hetuCleanChapterHtml((contentEl.html() || "") + "");
 }
 
 function hetuDebugDoc(doc) {

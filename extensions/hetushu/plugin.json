@@ -2,13 +2,13 @@
   "metadata": {
     "name": "hetushu",
     "author": "Dezyse",
-    "version": 1,
+    "version": 8,
     "source": "https://m.hetushu.com",
     "regexp": "https?:\\/\\/(?:m\\.|www\\.)?hetushu\\.com\\/book\\/\\d+\\/(?:index\\.html|\\d+\\.html)",
     "description": "Hetushu novel extension (mobile)",
     "locale": "zh_CN",
     "language": "javascript",
-    "type": "novel"
+    "type": "chinese_novel"
   },
   "script": {
     "home": "home.js",
