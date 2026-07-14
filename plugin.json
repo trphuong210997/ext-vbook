@@ -1,9 +1,20 @@
 {
     "metadata": {
-        "author": "B",
-        "description": "📛🔻📛"
+        "author": "Dezyse",
+        "description": "Vbook extension list"
     },
     "data": [
+        {
+            "name": "hetushu",
+            "author": "Dezyse",
+            "path": "https://raw.githubusercontent.com/trphuong210997/ext-vbook/main/extensions/hetushu/plugin.zip",
+            "version": 1,
+            "source": "https://m.hetushu.com",
+            "icon": "https://raw.githubusercontent.com/trphuong210997/ext-vbook/main/extensions/hetushu/icon.png",
+            "description": "Hetushu novel extension",
+            "type": "novel",
+            "locale": "zh_CN"
+        },
         {
             "name": "123ds",
             "author": "B",
