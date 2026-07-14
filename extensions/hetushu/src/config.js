@@ -80,7 +80,121 @@ function hetuHasContent(doc) {
     if (doc.select("#dir").size() > 0) return true;
     if (doc.select(".list dd").size() > 0) return true;
     if (doc.select("h2").size() > 0 && doc.select("a[href*='/book/']").size() > 0) return true;
+    if (hetuCountChapterLinks(doc) > 3) return true;
     return false;
+}
+
+function hetuCountChapterLinks(doc) {
+    var count = 0;
+    doc.select("a[href*='/book/']").forEach(function (el) {
+        var href = (el.attr("href") || "") + "";
+        if (href.match(/\/book\/\d+\/\d+\.html/)) count++;
+    });
+    return count;
+}
+
+function hetuParseChaptersFromDoc(doc, bookId, seen, chapters) {
+    if (!doc) return chapters;
+    if (!seen) seen = {};
+    if (!chapters) chapters = [];
+
+    doc.select("#dir dd a, #dir a, .chapter-list a, a[href*='/book/']").forEach(function (el) {
+        var chapName = (el.text() || "").trim() + "";
+        var chapUrl = (el.attr("href") || "") + "";
+        if (!chapName || !chapUrl) return;
+        if (chapUrl.indexOf("/book/") === -1) return;
+        if (chapUrl.indexOf("index.html") > -1) return;
+        if (chapUrl.indexOf("catalog-") > -1) return;
+        if (!chapUrl.match(/\/book\/\d+\/\d+\.html/)) return;
+        chapUrl = hetuAbsUrl(chapUrl);
+        if (seen[chapUrl]) return;
+        seen[chapUrl] = true;
+        chapters.push({ name: chapName, url: chapUrl, host: BASE_URL });
+    });
+    return chapters;
+}
+
+function hetuFetchDirJson(bookId) {
+    if (!bookId) return [];
+
+    var indexUrl = BASE_URL + "/book/" + bookId + "/index.html";
+    var warmRes = fetch(indexUrl, {
+        headers: hetuBuildHeaders(indexUrl, ""),
+        timeout: 12000
+    });
+    var cookie = warmRes.ok ? hetuCollectCookie(warmRes) : "";
+
+    var jsonUrls = [
+        DESKTOP_URL + "/book/" + bookId + "/dir.json",
+        BASE_URL + "/book/" + bookId + "/dir.json"
+    ];
+    var chapters = [];
+    var seen = {};
+    var i;
+    var j;
+
+    for (i = 0; i < jsonUrls.length; i++) {
+        var jsonRes = fetch(jsonUrls[i], {
+            headers: hetuBuildHeaders(indexUrl, cookie),
+            timeout: 12000
+        });
+        if (!jsonRes.ok) {
+            console.log("hetuFetchDirJson status=" + jsonRes.status + " url=" + jsonUrls[i]);
+            continue;
+        }
+        var raw = jsonRes.text() + "";
+        if (raw.indexOf("Just a moment") > -1 || raw.indexOf("Chờ một chút") > -1) continue;
+
+        var re = /\["dd","([^"]*)","(\d+)"\]/g;
+        var match;
+        while ((match = re.exec(raw)) !== null) {
+            var chapName = match[1];
+            var chapId = match[2];
+            var chapUrl = BASE_URL + "/book/" + bookId + "/" + chapId + ".html";
+            if (!seen[chapUrl]) {
+                seen[chapUrl] = true;
+                chapters.push({ name: chapName, url: chapUrl, host: BASE_URL });
+            }
+        }
+        if (chapters.length > 0) {
+            console.log("hetuFetchDirJson: OK count=" + chapters.length);
+            return chapters;
+        }
+    }
+    return [];
+}
+
+function hetuCollectTocPageUrls(indexUrl, doc) {
+    var bookId = hetuBookId(indexUrl);
+    var pages = [];
+    var seen = {};
+
+    function addPage(href) {
+        href = hetuAbsUrl(href);
+        if (!href || seen[href]) return;
+        seen[href] = true;
+        pages.push(href);
+    }
+
+    addPage(indexUrl);
+    if (doc) {
+        doc.select("a[href*='catalog-']").forEach(function (el) {
+            addPage(el.attr("href"));
+        });
+    }
+
+    if (bookId && pages.length === 1) {
+        var cat1 = BASE_URL + "/book/" + bookId + "/catalog-1.html";
+        var catDoc = hetuFetchDoc(cat1, indexUrl, "");
+        if (catDoc) {
+            addPage(cat1);
+            catDoc.select("a[href*='catalog-']").forEach(function (el) {
+                addPage(el.attr("href"));
+            });
+        }
+    }
+
+    return pages.length > 0 ? pages : [indexUrl];
 }
 
 function hetuIsChallengeTitle(title) {
@@ -309,5 +423,7 @@ function hetuDebugDoc(doc) {
     var title = titleEl ? (titleEl.text() + "") : "none";
     return "title=" + title
         + " content=" + doc.select("#content, #hetu-chap").size()
+        + " dir=" + doc.select("#dir").size()
+        + " chapLinks=" + hetuCountChapterLinks(doc)
         + " h2=" + doc.select("h2").size();
 }
