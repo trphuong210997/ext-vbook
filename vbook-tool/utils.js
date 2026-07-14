@@ -92,7 +92,7 @@ async function sendModernRequest(ip, port, endpoint, payload, verbose = false) {
                 'Content-Type': 'application/json',
                 'Content-Length': Buffer.byteLength(data)
             },
-            timeout: 15000
+            timeout: 60000
         };
 
         const req = http.request(options, (res) => {
